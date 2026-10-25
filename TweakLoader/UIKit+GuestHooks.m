@@ -777,3 +777,86 @@ static LCControlAppURLHandling LCHandleControlAppURL(NSURL *url, NSString** modi
     }
 }
 @end
+
+// Diagnostics: every scene the guest is given, with its role and its screen, appended to
+// Documents/LCSceneLog.txt in LiveContainer's own folder (Files > LiveContainer).
+static NSString *LCSceneLogPath(void) {
+    const char *home = getenv("LC_HOME_PATH");
+    if(!home) return nil;
+    return [[NSString stringWithUTF8String:home] stringByAppendingPathComponent:@"Documents/LCSceneLog.txt"];
+}
+
+static void LCSceneLog(NSString *line) {
+    NSString *path = LCSceneLogPath();
+    if(!path) return;
+    NSDictionary *attributes = [NSFileManager.defaultManager attributesOfItemAtPath:path error:nil];
+    if(attributes.fileSize > 512 * 1024) [NSFileManager.defaultManager removeItemAtPath:path error:nil];
+    if(![NSFileManager.defaultManager fileExistsAtPath:path]) [NSData.data writeToFile:path atomically:YES];
+    NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:path];
+    if(!file) return;
+    NSString *stamp = [NSDateFormatter localizedStringFromDate:NSDate.date dateStyle:NSDateFormatterNoStyle timeStyle:NSDateFormatterMediumStyle];
+    NSString *text = [NSString stringWithFormat:@"[%@] [%@] %@\n", stamp, NSUserDefaults.lcGuestAppId ?: @"?", line];
+    [file seekToEndOfFile];
+    [file writeData:[text dataUsingEncoding:NSUTF8StringEncoding]];
+    [file closeFile];
+}
+
+static NSString *LCSceneValue(id object, NSString *key) {
+    @try {
+        id value = [object valueForKey:key];
+        return value ? [value description] : @"nil";
+    } @catch (NSException *e) {
+        return @"-";
+    }
+}
+
+static NSString *LCSceneScreen(UIScreen *screen) {
+    if(!screen) return @"screen=nil";
+    return [NSString stringWithFormat:@"screen=%p main=%d bounds=%@ native=%@ scale=%.1f maxfps=%ld identity=%@ displayID=%@ external=%@ embedded=%@ desc=%@",
+            screen, screen == UIScreen.mainScreen, NSStringFromCGRect(screen.bounds), NSStringFromCGRect(screen.nativeBounds),
+            screen.scale, (long)screen.maximumFramesPerSecond,
+            LCSceneValue(screen, @"displayIdentity"), LCSceneValue(screen, @"_displayID"),
+            LCSceneValue(screen, @"_isExternal"), LCSceneValue(screen, @"_isEmbeddedScreen"),
+            [screen.description stringByReplacingOccurrencesOfString:@"\n" withString:@" "]];
+}
+
+static NSString *LCSceneDescribe(UIScene *scene) {
+    UISceneSession *session = scene.session;
+    NSString *screen = [scene isKindOfClass:UIWindowScene.class] ? LCSceneScreen(((UIWindowScene *)scene).screen) : @"not-a-window-scene";
+    return [NSString stringWithFormat:@"scene=%p class=%@ role=%@ config=%@ delegate=%@ state=%ld %@",
+            scene, NSStringFromClass(scene.class), session.role, session.configuration.name,
+            NSStringFromClass(session.configuration.delegateClass), (long)scene.activationState, screen];
+}
+
+static void LCSceneLogScreens(NSString *why) {
+    NSMutableString *line = [NSMutableString stringWithFormat:@"%@: %lu screen(s), %lu scene(s)", why,
+                             (unsigned long)UIScreen.screens.count, (unsigned long)UIApplication.sharedApplication.connectedScenes.count];
+    for(UIScreen *screen in UIScreen.screens) [line appendFormat:@"\n    %@", LCSceneScreen(screen)];
+    for(UIScene *scene in UIApplication.sharedApplication.connectedScenes) [line appendFormat:@"\n    %@", LCSceneDescribe(scene)];
+    LCSceneLog(line);
+}
+
+__attribute__((constructor))
+static void LCSceneLogInit(void) {
+    if(!NSUserDefaults.lcGuestAppId) return;
+    LCSceneLog(@"--- guest started ---");
+    NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
+    [center addObserverForName:UISceneWillConnectNotification object:nil queue:nil usingBlock:^(NSNotification *note) {
+        LCSceneLog([@"will-connect " stringByAppendingString:LCSceneDescribe(note.object)]);
+    }];
+    [center addObserverForName:UISceneDidActivateNotification object:nil queue:nil usingBlock:^(NSNotification *note) {
+        LCSceneLog([@"did-activate " stringByAppendingString:LCSceneDescribe(note.object)]);
+    }];
+    [center addObserverForName:UISceneDidDisconnectNotification object:nil queue:nil usingBlock:^(NSNotification *note) {
+        LCSceneLog([@"did-disconnect " stringByAppendingString:LCSceneDescribe(note.object)]);
+    }];
+    [center addObserverForName:UIScreenDidConnectNotification object:nil queue:nil usingBlock:^(NSNotification *note) {
+        LCSceneLogScreens(@"screen-connected");
+    }];
+    [center addObserverForName:UIScreenDidDisconnectNotification object:nil queue:nil usingBlock:^(NSNotification *note) {
+        LCSceneLogScreens(@"screen-disconnected");
+    }];
+    [center addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:nil usingBlock:^(NSNotification *note) {
+        LCSceneLogScreens(@"app-active");
+    }];
+}
